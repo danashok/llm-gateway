@@ -1,0 +1,65 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+dist/
+
+# Test binary
+*.test
+
+# Output of go coverage
+*.out
+coverage.html
+
+# Go workspace file
+go.work
+
+# Dependency directories
+vendor/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment files
+.env
+.env.local
+.env.*.local
+*.env
+
+# Log files
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+
+# Build artifacts
+build/
+
+# Air live reload
+tmp/
+
+# Swagger generated docs (regenerate with swag init)
+docs/docs.go
+docs/swagger.json
+docs/swagger.yaml
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Credentials and secrets
+*.pem
+*.key
+credentials.json
+secrets.yaml
