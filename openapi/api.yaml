@@ -1,0 +1,1175 @@
+openapi: 3.0.3
+info:
+  title: LLM Gateway API
+  description: |
+    A unified API gateway for interacting with multiple LLM providers (OpenAI, Anthropic, etc.)
+    with built-in compliance checking, rate limiting, session management, and audit logging.
+  version: 1.0.0
+  contact:
+    name: LLM Gateway Team
+
+servers:
+  - url: http://localhost:8080/api/v1
+    description: Local development server
+  - url: https://api.example.com/api/v1
+    description: Production server
+
+security:
+  - ApiKeyAuth: []
+
+tags:
+  - name: chat
+    description: LLM chat operations
+  - name: sessions
+    description: Session management
+  - name: api-keys
+    description: API key management
+  - name: release-units
+    description: Release unit authorization
+  - name: audit
+    description: Audit log queries
+  - name: budget
+    description: Team budget management
+  - name: compliance
+    description: Compliance violation queries
+  - name: health
+    description: Health check endpoints
+
+paths:
+  /chat:
+    post:
+      tags:
+        - chat
+      summary: Send a chat message to an LLM
+      description: |
+        Stream a chat completion from the specified LLM model.
+
+        The request goes through:
+        1. Authentication
+        2. Rate limit check
+        3. Session load/create
+        4. Compliance check (secrets, PII, sensitive projects)
+        5. Provider routing
+        6. SSE streaming response
+      operationId: chat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+            examples:
+              newChat:
+                summary: New chat without session
+                value:
+                  model_id: "gpt-4"
+                  prompt: "Explain quantum computing in simple terms"
+              continueChat:
+                summary: Continue existing session
+                value:
+                  model_id: "gpt-4"
+                  prompt: "Can you give me an example?"
+                  session_id: "550e8400-e29b-41d4-a716-446655440000"
+      responses:
+        '200':
+          description: SSE stream of response chunks
+          headers:
+            X-Trace-ID:
+              schema:
+                type: string
+                format: uuid
+              description: Unique trace ID for this request
+            X-Session-ID:
+              schema:
+                type: string
+                format: uuid
+              description: Session ID (new or existing)
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              examples:
+                stream:
+                  value: |
+                    data: {"content": "Quantum computing "}
+                    data: {"content": "uses quantum bits..."}
+                    data: {"finish_reason": "stop", "prompt_tokens": 15, "output_tokens": 150}
+                    data: [DONE]
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          description: Compliance violation detected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ComplianceError'
+              example:
+                error: "compliance check failed"
+                violations:
+                  - checker: "secret_checker"
+                    type: "aws_access_key"
+                    severity: "critical"
+                    message: "Potential AWS access key detected"
+                    blocked: true
+        '429':
+          $ref: '#/components/responses/RateLimitExceeded'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /models:
+    get:
+      tags:
+        - chat
+      summary: List available LLM models
+      description: Returns a list of all available LLM models that can be used with the chat endpoint.
+      operationId: listModels
+      responses:
+        '200':
+          description: List of available models
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  models:
+                    type: array
+                    items:
+                      type: string
+              example:
+                models:
+                  - "gpt-4"
+                  - "gpt-4-turbo"
+                  - "gpt-3.5-turbo"
+                  - "claude-3-opus"
+                  - "claude-3-sonnet"
+                  - "internal"
+
+  /sessions:
+    post:
+      tags:
+        - sessions
+      summary: Create a new session
+      description: Create a new chat session for maintaining conversation history.
+      operationId: createSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSessionRequest'
+      responses:
+        '201':
+          description: Session created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    get:
+      tags:
+        - sessions
+      summary: List developer's sessions
+      description: Get all sessions for the authenticated developer.
+      operationId: listSessions
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: List of sessions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Session'
+
+  /sessions/{id}:
+    get:
+      tags:
+        - sessions
+      summary: Get session by ID
+      description: Retrieve a specific session with its conversation history.
+      operationId: getSession
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Session details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags:
+        - sessions
+      summary: Delete a session
+      description: Delete a session and its conversation history.
+      operationId: deleteSession
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Session deleted successfully
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /audit/trace/{trace_id}:
+    get:
+      tags:
+        - audit
+      summary: Get audit logs by trace ID
+      description: Retrieve all audit log entries for a specific request trace.
+      operationId: getAuditByTrace
+      parameters:
+        - name: trace_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Audit log entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AuditLog'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /audit/team:
+    get:
+      tags:
+        - audit
+      summary: Get team's audit logs
+      description: Retrieve audit logs for the authenticated user's team.
+      operationId: getAuditByTeam
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Audit log entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AuditLog'
+
+  /audit/user:
+    get:
+      tags:
+        - audit
+      summary: Get user's audit logs
+      description: Retrieve audit logs for the authenticated user.
+      operationId: getAuditByUser
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Audit log entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AuditLog'
+
+  /audit/range:
+    get:
+      tags:
+        - audit
+      summary: Get audit logs by date range
+      description: Retrieve audit logs within a specific date range.
+      operationId: getAuditByDateRange
+      parameters:
+        - name: start
+          in: query
+          required: true
+          description: Start date (RFC3339 format)
+          schema:
+            type: string
+            format: date-time
+          example: "2024-01-01T00:00:00Z"
+        - name: end
+          in: query
+          required: true
+          description: End date (RFC3339 format)
+          schema:
+            type: string
+            format: date-time
+          example: "2024-01-31T23:59:59Z"
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Audit log entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AuditLog'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /budget:
+    get:
+      tags:
+        - budget
+      summary: Get team budget
+      description: Retrieve the current team's budget and usage information.
+      operationId: getBudget
+      responses:
+        '200':
+          description: Team budget details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamBudget'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    post:
+      tags:
+        - budget
+      summary: Create team budget
+      description: Create a new budget for the team.
+      operationId: createBudget
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateBudgetRequest'
+      responses:
+        '201':
+          description: Budget created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamBudget'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+    put:
+      tags:
+        - budget
+      summary: Update team budget
+      description: Update the team's budget limits.
+      operationId: updateBudget
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateBudgetRequest'
+      responses:
+        '200':
+          description: Budget updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamBudget'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /budget/check:
+    get:
+      tags:
+        - budget
+      summary: Check budget availability
+      description: Check if the team has remaining budget for requests.
+      operationId: checkBudget
+      responses:
+        '200':
+          description: Budget check result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  allowed:
+                    type: boolean
+                    description: Whether the team can make requests
+              example:
+                allowed: true
+
+  /compliance/trace/{trace_id}:
+    get:
+      tags:
+        - compliance
+      summary: Get violations by trace ID
+      description: Retrieve compliance violations for a specific request.
+      operationId: getViolationsByTrace
+      parameters:
+        - name: trace_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Compliance violations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ComplianceViolation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /compliance/team:
+    get:
+      tags:
+        - compliance
+      summary: Get team's violations
+      description: Retrieve compliance violations for the authenticated user's team.
+      operationId: getViolationsByTeam
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Compliance violations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ComplianceViolation'
+
+  /compliance/severity/{severity}:
+    get:
+      tags:
+        - compliance
+      summary: Get violations by severity
+      description: Retrieve compliance violations filtered by severity level.
+      operationId: getViolationsBySeverity
+      parameters:
+        - name: severity
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [low, medium, high, critical]
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Compliance violations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ComplianceViolation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /compliance/checker/{checker}:
+    get:
+      tags:
+        - compliance
+      summary: Get violations by checker
+      description: Retrieve compliance violations from a specific checker.
+      operationId: getViolationsByChecker
+      parameters:
+        - name: checker
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [secret_checker, pii_checker, project_checker]
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Compliance violations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ComplianceViolation'
+
+  /compliance/range:
+    get:
+      tags:
+        - compliance
+      summary: Get violations by date range
+      description: Retrieve compliance violations within a specific date range.
+      operationId: getViolationsByDateRange
+      parameters:
+        - name: start
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+        - name: end
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Compliance violations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ComplianceViolation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /compliance/stats:
+    get:
+      tags:
+        - compliance
+      summary: Get violation statistics
+      description: Get aggregated statistics about compliance violations for the team.
+      operationId: getViolationStats
+      responses:
+        '200':
+          description: Violation statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ViolationStats'
+
+  /api-keys:
+    post:
+      tags:
+        - api-keys
+      summary: Create a new API key
+      description: |
+        Create a new API key bound to a specific team, developer, and release unit.
+        The developer must be pre-authorized for the release unit.
+        The raw API key is only returned once - store it securely.
+      operationId: createAPIKey
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAPIKeyRequest'
+      responses:
+        '201':
+          description: API key created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateAPIKeyResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          description: Developer not authorized for release unit
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    get:
+      tags:
+        - api-keys
+      summary: List API keys
+      description: List all API keys for the authenticated developer.
+      operationId: listAPIKeys
+      responses:
+        '200':
+          description: List of API keys
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/APIKeyInfo'
+
+  /api-keys/{id}:
+    delete:
+      tags:
+        - api-keys
+      summary: Revoke an API key
+      description: Revoke an API key by ID. The key will no longer be usable.
+      operationId: revokeAPIKey
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '204':
+          description: API key revoked
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /release-units:
+    get:
+      tags:
+        - release-units
+      summary: List authorized release units
+      description: List all release units the authenticated developer is authorized for.
+      operationId: listReleaseUnits
+      responses:
+        '200':
+          description: List of authorized release units
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  release_units:
+                    type: array
+                    items:
+                      type: string
+              example:
+                release_units:
+                  - "project-alpha"
+                  - "project-beta"
+
+  /release-units/authorize:
+    post:
+      tags:
+        - release-units
+      summary: Authorize developer for release units
+      description: |
+        Grant a developer permission to create API keys for one or more release units.
+        This is typically done by team admins. Accepts an array of release unit names.
+      operationId: authorizeReleaseUnit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthorizeReleaseUnitRequest'
+      responses:
+        '201':
+          description: Authorization granted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "release unit authorized"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /release-units/revoke:
+    delete:
+      tags:
+        - release-units
+      summary: Revoke release unit authorization
+      description: Revoke a developer's authorization for a release unit.
+      operationId: revokeReleaseUnit
+      parameters:
+        - name: team_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: developer_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: release_unit
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Authorization revoked
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /health:
+    get:
+      tags:
+        - health
+      summary: Health check
+      description: Check if the service is healthy.
+      operationId: healthCheck
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: 'API key for authentication (format: Bearer {api_key})'
+
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      description: Maximum number of items to return
+      schema:
+        type: integer
+        default: 50
+        maximum: 100
+    Offset:
+      name: offset
+      in: query
+      description: Number of items to skip
+      schema:
+        type: integer
+        default: 0
+
+  schemas:
+    ChatRequest:
+      type: object
+      required:
+        - model_id
+        - prompt
+      properties:
+        model_id:
+          type: string
+          description: ID of the LLM model to use
+          example: "gpt-4"
+        prompt:
+          type: string
+          description: The user's message/prompt
+          example: "Explain quantum computing"
+        session_id:
+          type: string
+          format: uuid
+          description: Optional session ID to continue a conversation
+          example: "550e8400-e29b-41d4-a716-446655440000"
+
+    CreateSessionRequest:
+      type: object
+      required:
+        - model_id
+      properties:
+        model_id:
+          type: string
+          description: Initial model for the session
+          example: "gpt-4"
+        ttl:
+          type: integer
+          description: Session TTL in seconds
+          example: 3600
+
+    Session:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        team_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        developer_id:
+          type: string
+          format: uuid
+        model_id:
+          type: string
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/Message'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+
+    Message:
+      type: object
+      properties:
+        role:
+          type: string
+          enum: [user, assistant, system]
+        content:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+
+    AuditLog:
+      type: object
+      properties:
+        id:
+          type: integer
+        trace_id:
+          type: string
+          format: uuid
+        team_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        session_id:
+          type: string
+          format: uuid
+        event_type:
+          type: string
+          enum: [chat_request, chat_response, rate_limit_exceeded, compliance_violation, provider_error]
+        model_id:
+          type: string
+        prompt_hash:
+          type: string
+          description: SHA256 hash of the prompt
+        prompt_tokens:
+          type: integer
+        response_tokens:
+          type: integer
+        total_tokens:
+          type: integer
+        duration_ms:
+          type: integer
+        status_code:
+          type: integer
+        error_message:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    TeamBudget:
+      type: object
+      properties:
+        id:
+          type: integer
+        team_id:
+          type: string
+          format: uuid
+        daily_token_limit:
+          type: integer
+          example: 100000
+        monthly_token_limit:
+          type: integer
+          example: 1000000
+        daily_tokens_used:
+          type: integer
+        monthly_tokens_used:
+          type: integer
+        last_reset_daily:
+          type: string
+          format: date-time
+        last_reset_monthly:
+          type: string
+          format: date-time
+        is_active:
+          type: boolean
+
+    CreateBudgetRequest:
+      type: object
+      properties:
+        daily_token_limit:
+          type: integer
+          example: 100000
+        monthly_token_limit:
+          type: integer
+          example: 1000000
+
+    UpdateBudgetRequest:
+      type: object
+      properties:
+        daily_token_limit:
+          type: integer
+        monthly_token_limit:
+          type: integer
+        is_active:
+          type: boolean
+
+    ComplianceViolation:
+      type: object
+      properties:
+        id:
+          type: integer
+        trace_id:
+          type: string
+          format: uuid
+        team_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        session_id:
+          type: string
+          format: uuid
+        checker_name:
+          type: string
+          example: "secret_checker"
+        violation_type:
+          type: string
+          example: "aws_access_key"
+        severity:
+          type: string
+          enum: [low, medium, high, critical]
+        message:
+          type: string
+        blocked:
+          type: boolean
+          description: Whether the request was blocked
+        created_at:
+          type: string
+          format: date-time
+
+    ComplianceError:
+      type: object
+      properties:
+        error:
+          type: string
+          example: "compliance check failed"
+        violations:
+          type: array
+          items:
+            type: object
+            properties:
+              checker:
+                type: string
+              type:
+                type: string
+              severity:
+                type: string
+              message:
+                type: string
+              blocked:
+                type: boolean
+
+    ViolationStats:
+      type: object
+      properties:
+        total_violations:
+          type: integer
+        critical_count:
+          type: integer
+        high_count:
+          type: integer
+        medium_count:
+          type: integer
+        low_count:
+          type: integer
+        blocked_requests:
+          type: integer
+
+    CreateAPIKeyRequest:
+      type: object
+      required:
+        - team_id
+        - developer_id
+        - user_id
+        - release_unit
+      properties:
+        team_id:
+          type: string
+          format: uuid
+        developer_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        release_unit:
+          type: string
+          description: Project/release unit name
+          example: "project-alpha"
+        description:
+          type: string
+          description: Optional description for the key
+          example: "CI/CD pipeline key"
+        expires_in_days:
+          type: integer
+          description: Days until expiration (optional)
+          example: 90
+
+    CreateAPIKeyResponse:
+      type: object
+      properties:
+        api_key:
+          type: string
+          description: The raw API key - only shown once, store securely
+          example: "llmgw_a1b2c3d4e5f6..."
+        key_prefix:
+          type: string
+          description: First 8 chars for identification
+          example: "llmgw_a1"
+        team_id:
+          type: string
+          format: uuid
+        developer_id:
+          type: string
+          format: uuid
+        release_unit:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+
+    APIKeyInfo:
+      type: object
+      properties:
+        id:
+          type: integer
+        key_prefix:
+          type: string
+          description: First 8 chars for identification
+        team_id:
+          type: string
+          format: uuid
+        developer_id:
+          type: string
+          format: uuid
+        release_unit:
+          type: string
+        description:
+          type: string
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+
+    AuthorizeReleaseUnitRequest:
+      type: object
+      required:
+        - team_id
+        - developer_id
+        - release_units
+      properties:
+        team_id:
+          type: string
+          format: uuid
+        developer_id:
+          type: string
+          format: uuid
+        release_units:
+          type: array
+          items:
+            type: string
+          minItems: 1
+          description: List of project/release unit names to authorize
+          example: ["project-alpha", "project-beta", "project-gamma"]
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "invalid request body"
+
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "missing or invalid API key"
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "resource not found"
+
+    RateLimitExceeded:
+      description: Rate limit exceeded
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "rate limit exceeded"
+
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "internal server error"

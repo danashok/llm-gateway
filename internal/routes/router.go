@@ -32,15 +32,16 @@ type RouteOptions struct {
 }
 
 type Routes struct {
-	options                      *RouteOptions
-	repo                         *repository.Handler
-	chatHandler                  *gateway.ChatHandler
-	workerPool                   worker.IWorkerPool
-	chatController               *controller.ChatController
-	sessionController            *controller.SessionController
-	auditLogController           *controller.AuditLogController
-	teamBudgetController         *controller.TeamBudgetController
+	options                       *RouteOptions
+	repo                          *repository.Handler
+	chatHandler                   *gateway.ChatHandler
+	workerPool                    worker.IWorkerPool
+	chatController                *controller.ChatController
+	sessionController             *controller.SessionController
+	auditLogController            *controller.AuditLogController
+	teamBudgetController          *controller.TeamBudgetController
 	complianceViolationController *controller.ComplianceViolationController
+	apiKeyController              *controller.APIKeyController
 }
 
 func NewRoutes(options *RouteOptions) (*Routes, error) {
@@ -86,6 +87,7 @@ func NewRoutes(options *RouteOptions) (*Routes, error) {
 	auditLogSvc := service.NewAuditLogService(repo.AuditLog)
 	teamBudgetSvc := service.NewTeamBudgetService(repo.TeamBudget, 100000, 1000000)
 	complianceViolationSvc := service.NewComplianceViolationService(repo.ComplianceViolation)
+	apiKeySvc := service.NewAPIKeyService(repo.APIKey)
 
 	// Initialize controllers
 	chatCtrl := controller.NewChatController(chatHandler, options.Logger)
@@ -93,6 +95,7 @@ func NewRoutes(options *RouteOptions) (*Routes, error) {
 	auditLogCtrl := controller.NewAuditLogController(auditLogSvc, options.Logger)
 	teamBudgetCtrl := controller.NewTeamBudgetController(teamBudgetSvc, options.Logger)
 	complianceViolationCtrl := controller.NewComplianceViolationController(complianceViolationSvc, options.Logger)
+	apiKeyCtrl := controller.NewAPIKeyController(apiKeySvc, options.Logger)
 
 	return &Routes{
 		options:                       options,
@@ -104,6 +107,7 @@ func NewRoutes(options *RouteOptions) (*Routes, error) {
 		auditLogController:            auditLogCtrl,
 		teamBudgetController:          teamBudgetCtrl,
 		complianceViolationController: complianceViolationCtrl,
+		apiKeyController:              apiKeyCtrl,
 	}, nil
 }
 
@@ -125,9 +129,15 @@ func (r *Routes) Bind(router *gin.Engine) {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
 
-	// Protected routes
+	// Auth middleware configuration with API key validation
+	authMiddleware := middleware.AuthMiddlewareWithConfig(middleware.AuthMiddlewareConfig{
+		APIKeyRepo: r.repo.APIKey,
+		Logger:     r.options.Logger,
+	})
+
+	// Protected routes - require valid API key with team + developer + release unit
 	protected := v1.Group("")
-	protected.Use(middleware.AuthMiddleware())
+	protected.Use(authMiddleware)
 
 	// Bind all controller routes
 	r.chatController.BindRoutes(protected)
@@ -135,6 +145,7 @@ func (r *Routes) Bind(router *gin.Engine) {
 	r.auditLogController.BindRoutes(protected)
 	r.teamBudgetController.BindRoutes(protected)
 	r.complianceViolationController.BindRoutes(protected)
+	r.apiKeyController.BindRoutes(protected)
 }
 
 func (r *Routes) Shutdown() {

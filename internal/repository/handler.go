@@ -9,6 +9,7 @@ type Handler struct {
 	AuditLog            IAuditLogRepository
 	TeamBudget          ITeamBudgetRepository
 	ComplianceViolation IComplianceViolationRepository
+	APIKey              IAPIKeyRepository
 }
 
 // NewHandler creates a new repository handler with all repositories initialized
@@ -19,5 +20,6 @@ func NewHandler(db *gorm.DB) *Handler {
 		AuditLog:            NewAuditLogRepository(db),
 		TeamBudget:          NewTeamBudgetRepository(db),
 		ComplianceViolation: NewComplianceViolationRepository(db),
+		APIKey:              NewAPIKeyRepository(db),
 	}
 }

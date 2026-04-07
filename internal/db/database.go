@@ -36,6 +36,8 @@ func AutoMigrate(ctx context.Context, logger *zap.Logger, db *gorm.DB) error {
 		&models.AuditLog{},
 		&models.TeamBudget{},
 		&models.ComplianceViolation{},
+		&models.APIKey{},
+		&models.TeamDeveloperReleaseUnit{},
 	); err != nil {
 		logger.Error("failed to auto-migrate database", zap.Error(err))
 		return fmt.Errorf("failed to auto-migrate database: %w", err)
